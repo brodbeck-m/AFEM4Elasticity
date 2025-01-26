@@ -27,4 +27,7 @@ RUN git clone --depth 1 --branch v1.2.0 https://github.com/brodbeck-m/dolfinx_eq
     cmake -G Ninja -B build-dir -DCMAKE_BUILD_TYPE=Release cpp/ &&\
     ninja -C build-dir install &&\
     pip3 install python/ -v --upgrade
+    
+# --- Install adFEM ---
 
+# --- Install testcases ---

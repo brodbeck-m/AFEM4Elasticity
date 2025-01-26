@@ -1,5 +1,5 @@
 {
-	"name": "dolfinx-v0.9.0r1",
+	"name": "dolfinx_eqlb-v1.2.0",
 	"build": {
 		"dockerfile": "Dockerfile",
 		"cacheFrom": "brewblox/firmware-devcontainer:bullseye",
@@ -14,7 +14,7 @@
 				"path": "/bin/bash"
 			}
 		},
-		"python.defaultInterpreterPath": "/dolfinx-env/bin/python3",
+		"python.defaultInterpreterPath": "/usr/bin/python3",
 		"[python]": {
 			"editor.defaultFormatter": "ms-python.black-formatter",
 			"editor.formatOnSave": true,

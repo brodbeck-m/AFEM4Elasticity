@@ -1,8 +1,15 @@
+from enum import Enum
 import typing
 import numpy as np
 
 from dolfinx import fem, io, mesh
 import ufl
+
+
+class MarkingStrategy(Enum):
+    none = 0
+    doerfler = 1
+    maximum = 2
 
 
 class Domain:
@@ -32,24 +39,47 @@ class AdaptiveDomain:
     Create an initial mesh and refines it based on the Doerfler strategy.
     """
 
-    def __init__(self, name: str):
+    def __init__(
+        self,
+        name: str,
+        marking_strategy: MarkingStrategy,
+        marking_parameter: float,
+        nref: int,
+        accuracy: typing.Optional[float] = None,
+    ):
         """Constructor
 
         Args:
-            name: The domain name
+            name:             The domain name
+            marking_strategy: The marking strategy
+            nref:             The number of refinements
+            accuracy:         The accuracy, after which the adaptive procedure stops
         """
 
         # --- Initialise storage
         # The domain name
         self.name = name
 
-        # The mesh counter
+        # The adaptive algorithm
+        self.marking_strategy = marking_strategy
+        self.marking_parameter = marking_parameter
+        self.refinement_level_max = nref
+        self.final_accuracy = accuracy
         self.refinement_level = 0
 
         # The boundary markers
         self.boundary_markers = []
 
-    # --- Generate the mesh ---
+    # --- The mesh definition ---
+    def create(self, h: typing.Union[float, int, typing.List[int]]) -> Domain:
+        """Create a meshed domain
+
+        Args:
+            h: The mesh size
+        """
+        raise NotImplementedError("Method not implemented")
+
+    # --- Set boundary markers ---
     def mark_boundary(self, meshed_domain: mesh.Mesh) -> Domain:
         """Marks the boundary based on the initially defined boundary markers"""
 
@@ -71,17 +101,9 @@ class AdaptiveDomain:
 
         return Domain(meshed_domain, facet_functions, ds)
 
-    def create(self, h: typing.Union[float, typing.List[int]]) -> Domain:
-        """Create a meshed domain
-
-        Args:
-            h: The mesh size
-        """
-        raise NotImplementedError("Method not implemented")
-
+    # --- Refine the mesh ---
     def refine(
         self,
-        doerfler: float,
         domain: Domain,
         eta_h: typing.Optional[fem.Function] = None,
         outname: typing.Optional[str] = None,
@@ -89,7 +111,6 @@ class AdaptiveDomain:
         """Refine the mesh based on Doerflers marking strategy
 
         Args:
-            doerfler: The Doerfler parameter
             domain:   The domain
             eta_h:    The function of the cells error estimate
             outname:  The name of the output file for the mesh
@@ -101,37 +122,40 @@ class AdaptiveDomain:
         comm = msh.comm
 
         # Refine the mesh
-        if np.isclose(doerfler, 1.0):
+        if np.isclose(self.marking_parameter, 1.0):
             # Refine entire mesh
             meshed_domain = mesh.refine(msh)
         else:
-            # Check input
-            if eta_h is None:
-                raise ValueError("Error estimate required!")
+            if self.marking_strategy == MarkingStrategy.maximum:
+                raise NotImplementedError("Maximum marking not implemented")
+            else:
+                # Check input
+                if eta_h is None:
+                    raise ValueError("Error estimate required!")
 
-            # The total error (squared!)
-            eta_total = np.sum(eta_h.array)
+                # The total error (squared!)
+                eta_total = np.sum(eta_h.array)
 
-            # Cut-off
-            cutoff = doerfler * eta_total
+                # Cut-off
+                cutoff = self.marking_parameter * eta_total
 
-            # Sort cell contributions
-            sorted_cells = np.argsort(eta_h.array)[::-1]
+                # Sort cell contributions
+                sorted_cells = np.argsort(eta_h.array)[::-1]
 
-            # Create list of refined cells
-            rolling_sum = 0.0
-            breakpoint = ncells
+                # Create list of refined cells
+                rolling_sum = 0.0
+                breakpoint = ncells
 
-            for i, e in enumerate(eta_h.array[sorted_cells]):
-                rolling_sum += e
-                if rolling_sum > cutoff:
-                    breakpoint = i
-                    break
+                for i, e in enumerate(eta_h.array[sorted_cells]):
+                    rolling_sum += e
+                    if rolling_sum > cutoff:
+                        breakpoint = i
+                        break
 
-            # List of refined cells
-            refine_cells = np.array(
-                np.sort(sorted_cells[0 : breakpoint + 1]), dtype=np.int32
-            )
+                # List of refined cells
+                refine_cells = np.array(
+                    np.sort(sorted_cells[0 : breakpoint + 1]), dtype=np.int32
+                )
 
             # Refine mesh
             edges = mesh.compute_incident_entities(self.mesh, refine_cells, 2, 1)

@@ -19,7 +19,7 @@ RUN sed -i 's%<Eigen/Core>%<eigen3/Eigen/Core>%' ${PYBIND_EIGEN_PATH} && \
     sed -i 's%<Eigen/SparseCore>%<eigen3/Eigen/SparseCore>%' ${PYBIND_EIGEN_PATH}
 
 # Some additional python packages
-RUN pip3 install matplotlib
+RUN pip3 install matplotlib meshio
 
 # --- Install dolfinx_eqlb ---
 RUN git clone --depth 1 --branch v1.2.0 https://github.com/brodbeck-m/dolfinx_eqlb &&\

@@ -2,7 +2,8 @@ import numpy as np
 import typing
 
 from .basics import EqType, DiscDict
-from .domain import AdaptiveDomain, MarkingStrategy, EssntBC
+from .domain import AdaptiveDomain, MarkingStrategy
+from .bcs import BCs
 from .lin_elasticity import solve as solve_linelast
 from .lin_elasticity import estimate as estimate_linelast
 
@@ -12,7 +13,7 @@ def adaptive_solver(
     eq_type: EqType,
     matpar: typing.Union[float, typing.List[float]],
     domain: typing.Type[AdaptiveDomain],
-    bcs: typing.Type[EssntBC],
+    bcs: typing.Type[BCs],
     sdisc: typing.Type[DiscDict],
     h_0: typing.Union[int, typing.List[int], float],
     f: typing.Optional[typing.Any] = None,

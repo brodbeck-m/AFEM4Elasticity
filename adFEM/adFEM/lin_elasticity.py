@@ -8,7 +8,7 @@ from dolfinx import fem, mesh, la, io
 import ufl
 
 from .basics import DiscDict, expnum_to_str
-from .domain import Domain, EssntBC
+from .domain import Domain
 
 
 # --- Enum classes ---
@@ -192,7 +192,7 @@ def weak_form_ls(
 def solve(
     pi_1: float,
     domain: Domain,
-    bcs: typing.Type[EssntBC],
+    bcs: typing.Type[typing.Any],
     sdisc: DiscElast,
     f: typing.Optional[typing.Any] = None,
     outname: typing.Optional[str] = None,
@@ -231,7 +231,7 @@ def solve(
     bcs_essnt, bcs_weak = bcs.set(V, domain.facet_functions, domain.ds)
 
     if bcs_weak is not None:
-        residual += bcs_weak
+        residual -= bcs_weak
 
     # --- The solver
     u_h = fem.Function(V)

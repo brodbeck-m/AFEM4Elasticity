@@ -2,7 +2,7 @@ from enum import Enum
 import typing
 from mpi4py import MPI
 import numpy as np
-from petsc4py import PETSc
+from petsc4py.PETSc import ScalarType
 
 from dolfinx import fem, io, mesh
 import ufl
@@ -10,26 +10,18 @@ import ufl
 
 # --- The collected boundary conditions ---
 class BCs:
-    """The collected boundary conditions
-
-    Based on a function-space of a problem, boundary conditions (BC) are
-    specified for each sub-space respectively each spatial dimension of
-    vector valued subspaces.
-
-
-
-    """
+    """The collected boundary conditions"""
 
     def __init__(
         self,
-        primal_bcs: typing.List[
+        essential_bcs: typing.List[
             typing.List[
                 typing.List[
                     typing.Tuple[typing.List[int], typing.Union[float, typing.Callable]]
                 ]
             ]
         ],
-        dual_bcs: typing.List[
+        natural_bcs: typing.List[
             typing.List[
                 typing.List[
                     typing.Tuple[typing.List[int], typing.Union[float, typing.Callable]]
@@ -37,6 +29,35 @@ class BCs:
             ]
         ],
     ):
+        """Initialise boundary conditions
+
+        Based on a function-space of a problem, boundary conditions (BC) are
+        specified for each sub-space respectively each spatial dimension of
+        vector valued subspace in a list.
+
+        BCs for vector-valued function-spaces:
+
+            bcs[i][j][:]   -> BC on j-th dimension of the i-th subspace
+            bcs[i][j+1][:] -> BC on the entire i-th subspace (only for essential BCs)
+
+        BCs for scalar-valued function-spaces:
+
+            bcs[i][j][:] -> BC on the i-th subspace
+
+        If a function-space is not mixed, i is equal to 0. Each bc itself is
+        specified as a tuple
+
+                            (ids, val)
+
+        where ids are a list of boundary markers and val is the prescribed value.
+        The value is thereby either a (float) value of a callable function,depen-
+        ding only on the spatial position.
+
+        Args:
+            essential_bcs: The essential boundary conditions
+            natural_bcs:   The natural boundary conditions
+        """
+
         def empty_input(inp) -> bool:
             for sublist in inp:
                 if isinstance(sublist, list):
@@ -71,19 +92,19 @@ class BCs:
         self.v_sub_element_is_vvalued: typing.List[bool] = []
 
         # BCs for the primal field
-        self.primal_bcs = primal_bcs
+        self.esnt_bcs = essential_bcs
 
         # BCs for the dual field
-        self.dual_bcs = dual_bcs
+        self.natr_bcs = natural_bcs
 
         # Markers
         self.bcs_initialised: bool = False
-        self.has_primal_bcs = not empty_input(self.primal_bcs)
-        self.has_dual_bcs = not empty_input(self.dual_bcs)
+        self.has_primal_bcs = not empty_input(self.esnt_bcs)
+        self.has_dual_bcs = not empty_input(self.natr_bcs)
         if self.has_dual_bcs:
-            self.dual_bcs_are_zero = mark_zero_dual_bcs(self.dual_bcs)
+            self.natr_bcs_are_zero = mark_zero_dual_bcs(self.natr_bcs)
         else:
-            self.dual_bcs_are_zero = True
+            self.natr_bcs_are_zero = True
 
     def set(
         self,
@@ -135,44 +156,46 @@ class BCs:
 
             # Check input
             for i, numsub_i in enumerate(self.v_num_sub_elements):
-                if len(self.primal_bcs[i]) != numsub_i:
+                if (numsub_i == 1 and len(self.esnt_bcs[i]) != numsub_i) or (
+                    numsub_i > 1 and len(self.esnt_bcs[i]) != (numsub_i + 1)
+                ):
                     raise ValueError(
                         "The number of primal BCs does not match the number of subspaces!"
                     )
 
-                if len(self.dual_bcs[i]) != numsub_i:
+                if len(self.natr_bcs[i]) != numsub_i:
                     raise ValueError(
                         "The number of dual BCs does not match the number of subspaces!"
                     )
 
-        # The facet dimension
-        fdim = V.mesh.topology.dim - 1
-
         # Initialise list of BCs
         bcs_essnt = []
-        bcs_natural = None if self.dual_bcs_are_zero else 0
+        bcs_natural = None if self.natr_bcs_are_zero else 0
 
         def set_essential_bcs(
-            fspace: typing.Tuple[fem.FunctionSpace, bool], definitions
+            bcs,
+            fspace: typing.Tuple[fem.FunctionSpace, bool],
+            result: typing.List[fem.DirichletBCMetaClass],
         ):
             # Extract function-space
             V = fspace[0]
             is_vector_valued = fspace[1]
 
+            # The spatial dimension
+            gdim = V.mesh.geometry.dim
+            fdim = gdim - 1
+
             # Functions for prescribing the BC
             uDs = []
 
             if is_vector_valued:
-                # The FE space of each vector component
-                for i, def_i in enumerate(definitions):
-                    if def_i:
-                        for ids, val in def_i:
+                # BCs on single vector components
+                for j, bcs_j in enumerate(bcs[:-1]):
+                    if bcs_j:
+                        for ids, val in bcs_j:
                             # The boundary DOFs
-                            dofs = fem.locate_dofs_topological(
-                                V.sub(i),
-                                fdim,
-                                fct_fkts.indices[np.isin(fct_fkts.values, ids)],
-                            )
+                            fcts = fct_fkts.indices[np.isin(fct_fkts.values, ids)]
+                            dofs = fem.locate_dofs_topological(V.sub(j), fdim, fcts)
 
                             # Set the boundary condition
                             if callable(val):
@@ -180,29 +203,39 @@ class BCs:
                                     "BC currently not implementable in DOLFINx"
                                 )
                             else:
-                                bcs_essnt.append(
-                                    fem.dirichletbc(
-                                        PETSc.ScalarType(val), dofs, V.sub(i)
-                                    )
+                                result.append(
+                                    fem.dirichletbc(ScalarType(val), dofs, V.sub(j))
                                 )
-            else:
-                if def_i:
-                    for ids, val in definitions:
+
+                # BCs on the entire vector-valued subspace
+                if bcs[-1]:
+                    for ids, val in bcs[-1]:
                         # The boundary DOFs
-                        dofs = fem.locate_dofs_topological(
-                            V, fdim, fct_fkts.indices[np.isin(fct_fkts.values, ids)]
-                        )
+                        fcts = fct_fkts.indices[np.isin(fct_fkts.values, ids)]
+                        dofs = fem.locate_dofs_topological(V, fdim, fcts)
 
                         # Set the boundary condition
                         if callable(val):
                             uDs.append(fem.Function(V))
                             uDs[-1].interpolate(val)
+                            result.append(fem.dirichletbc(uDs[-1], dofs))
+                        else:
+                            uD = np.array((val,) * gdim, dtype=ScalarType)
+                            result.append(fem.dirichletbc(uD, dofs, V))
+            else:
+                if bcs_j:
+                    for ids, val in bcs_j:
+                        # The boundary DOFs
+                        fcts = fct_fkts.indices[np.isin(fct_fkts.values, ids)]
+                        dofs = fem.locate_dofs_topological(V, fdim, fcts)
 
+                        # Set the boundary condition
+                        if callable(val):
+                            uDs.append(fem.Function(V))
+                            uDs[-1].interpolate(val)
                             bcs_essnt.append(fem.dirichletbc(uDs[-1], dofs))
                         else:
-                            bcs_essnt.append(
-                                fem.dirichletbc(PETSc.ScalarType(val), dofs)
-                            )
+                            bcs_essnt.append(fem.dirichletbc(ScalarType(val), dofs))
 
         def set_essential_bcs_mixed_space(
             fspace: typing.Tuple[fem.FunctionSpace, int, bool], definitions
@@ -214,6 +247,9 @@ class BCs:
 
             # The collapsed subspace
             Vi, _ = V.sub(i).collapse()
+
+            # The facet dimension
+            fdim = V.mesh.geometry.dim - 1
 
             # Functions for prescribing the BC
             uDs = []
@@ -304,7 +340,7 @@ class BCs:
 
             return l_i
 
-        for i, (ebcs, nbcs) in enumerate(zip(self.primal_bcs, self.dual_bcs)):
+        for i, (ebcs, nbcs) in enumerate(zip(self.esnt_bcs, self.natr_bcs)):
             # Check if (sub)-space is vector-valued
             is_vvalued = self.v_sub_element_is_vvalued[i]
 
@@ -312,12 +348,12 @@ class BCs:
             if self.v_is_mixed:
                 set_essential_bcs_mixed_space((V, i, is_vvalued), ebcs)
 
-                if not self.dual_bcs_are_zero:
+                if not self.natr_bcs_are_zero:
                     bcs_natural += set_natural_bcs(nbcs, (V, i, is_vvalued), ds)
             else:
-                set_essential_bcs((V, is_vvalued), ebcs)
+                set_essential_bcs(ebcs, (V, is_vvalued), bcs_essnt)
 
-                if not self.dual_bcs_are_zero:
+                if not self.natr_bcs_are_zero:
                     bcs_natural += set_natural_bcs(nbcs, (V, None, is_vvalued), ds)
 
         return bcs_essnt, bcs_natural

@@ -277,9 +277,10 @@ def solve(
 
     # --- Export solution to ParaView
     if sdisc.fe_type == FEType.fem_u:
-        if outname is not None:
-            list_uh = [u_h]
+        list_uh = [u_h]
 
+        if outname is not None:
+            u_h.name = "displacement"
             with io.VTXWriter(MPI.COMM_WORLD, outname + "_pvar-u.bp", [u_h]) as vtx:
                 vtx.write(1.0)
     elif sdisc.fe_type == FEType.fem_u_p:
@@ -289,9 +290,10 @@ def solve(
         u_h_sig1 = u_h.sub(1).collapse()
         u_h_sig2 = u_h.sub(2).collapse()
 
-        list_uh = [u_h, u_h_sig1, u_h_sig2]
+        list_uh = [u_h_u, u_h_sig1, u_h_sig2]
 
         if outname is not None:
+            u_h_u.name = "displacement"
             with io.VTXWriter(MPI.COMM_WORLD, outname + "_pvar-u.bp", [u_h_u]) as vtx:
                 vtx.write(1.0)
 

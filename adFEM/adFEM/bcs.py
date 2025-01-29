@@ -21,28 +21,33 @@ class BCs:
                 ]
             ]
         ],
-        natural_bcs: typing.List[
+        natural_bcs: typing.Optional[
             typing.List[
                 typing.List[
-                    typing.Tuple[typing.List[int], typing.Union[float, typing.Callable]]
+                    typing.List[
+                        typing.Tuple[
+                            typing.List[int], typing.Union[float, typing.Callable]
+                        ]
+                    ]
                 ]
             ]
-        ],
+        ] = None,
     ):
         """Initialise boundary conditions
 
         Based on a function-space of a problem, boundary conditions (BC) are
         specified for each sub-space respectively each spatial dimension of
-        vector valued subspace in a list.
+        vector valued subspace in a list:
 
-        BCs for vector-valued function-spaces:
+            BCs for vector-valued function-spaces:
 
-            bcs[i][j][:]   -> BC on j-th dimension of the i-th subspace
-            bcs[i][j+1][:] -> BC on the entire i-th subspace (only for essential BCs)
+                bcs[i][j][:]   -> BC on j-th dimension of the i-th subspace
+                bcs[i][j+1][:] -> BC on the entire i-th subspace
+                                  (only for essential BCs)
 
-        BCs for scalar-valued function-spaces:
+            BCs for scalar-valued function-spaces:
 
-            bcs[i][j][:] -> BC on the i-th subspace
+                bcs[i][j][:] -> BC on the i-th subspace
 
         If a function-space is not mixed, i is equal to 0. Each bc itself is
         specified as a tuple
@@ -51,39 +56,46 @@ class BCs:
 
         where ids are a list of boundary markers and val is the prescribed value.
         The value is thereby either a (float) value of a callable function,depen-
-        ding only on the spatial position.
+        ding only on the spatial position. If a list is replaced by 'None', no BC
+        is prescribed.
 
         Args:
             essential_bcs: The essential boundary conditions
             natural_bcs:   The natural boundary conditions
         """
 
-        def empty_input(inp) -> bool:
-            for sublist in inp:
-                if isinstance(sublist, list):
-                    if not empty_input(sublist):
-                        return False
-                elif sublist:
-                    return False
-            return True
+        def is_none(inp) -> bool:
+            def repl_none(inp):
+                if isinstance(inp, list):
+                    for i in range(len(inp)):
+                        if inp[i] is None:
+                            inp[i] = []
+                        else:
+                            repl_none(inp[i])
 
-        def mark_zero_dual_bcs(inp) -> bool:
+            # Check if all inputs are None
+            isnone = True if (inp is None) else all(e is None for e in inp)
+
+            # Replace none by empty list
+            repl_none(inp)
+
+            return isnone
+
+        def mark_zero_bcs(inp) -> bool:
             all_zero = True
 
             for i, def_i in enumerate(inp):
                 for j, def_ij in enumerate(def_i):
-                    if def_ij:
-                        for k, (_, val) in enumerate(def_ij):
-                            if callable(val):
+                    for k, (_, val) in enumerate(def_ij):
+                        if callable(val):
+                            all_zero = False
+                            inp[i][j][k] += (False,)
+                        else:
+                            if np.isclose(val, 0.0):
+                                inp[i][j][k] += (True,)
+                            else:
                                 all_zero = False
                                 inp[i][j][k] += (False,)
-                            else:
-                                if np.isclose(val, 0.0):
-                                    inp[i][j][k] += (True,)
-                                else:
-                                    all_zero = False
-                                    inp[i][j][k] += (False,)
-
             return all_zero
 
         # The underlying function-space
@@ -93,18 +105,19 @@ class BCs:
 
         # BCs for the primal field
         self.esnt_bcs = essential_bcs
+        self.has_esnt_bcs = not is_none(self.esnt_bcs)
 
         # BCs for the dual field
-        self.natr_bcs = natural_bcs
+        if natural_bcs is None:
+            self.natr_bcs = [None for _ in range(len(essential_bcs))]
+        else:
+            self.natr_bcs = natural_bcs
+
+        self.has_natr_bcs = not is_none(self.natr_bcs)
+        self.natr_bcs_are_zero = mark_zero_bcs(self.natr_bcs)
 
         # Markers
         self.bcs_initialised: bool = False
-        self.has_primal_bcs = not empty_input(self.esnt_bcs)
-        self.has_dual_bcs = not empty_input(self.natr_bcs)
-        if self.has_dual_bcs:
-            self.natr_bcs_are_zero = mark_zero_dual_bcs(self.natr_bcs)
-        else:
-            self.natr_bcs_are_zero = True
 
     def set(
         self,
@@ -154,19 +167,7 @@ class BCs:
                     self.v_num_sub_elements.append(nsub)
                     self.v_sub_element_is_vvalued.append(True)
 
-            # Check input
-            for i, numsub_i in enumerate(self.v_num_sub_elements):
-                if (numsub_i == 1 and len(self.esnt_bcs[i]) != numsub_i) or (
-                    numsub_i > 1 and len(self.esnt_bcs[i]) != (numsub_i + 1)
-                ):
-                    raise ValueError(
-                        "The number of primal BCs does not match the number of subspaces!"
-                    )
-
-                if len(self.natr_bcs[i]) != numsub_i:
-                    raise ValueError(
-                        "The number of dual BCs does not match the number of subspaces!"
-                    )
+            # TODO - Add input checks
 
         # Initialise list of BCs
         bcs_essnt = []
@@ -191,54 +192,53 @@ class BCs:
             if is_vector_valued:
                 # BCs on single vector components
                 for j, bcs_j in enumerate(bcs[:-1]):
-                    if bcs_j:
-                        for ids, val in bcs_j:
-                            # The boundary DOFs
-                            fcts = fct_fkts.indices[np.isin(fct_fkts.values, ids)]
-                            dofs = fem.locate_dofs_topological(V.sub(j), fdim, fcts)
-
-                            # Set the boundary condition
-                            if callable(val):
-                                raise NotImplementedError(
-                                    "BC currently not implementable in DOLFINx"
-                                )
-                            else:
-                                result.append(
-                                    fem.dirichletbc(ScalarType(val), dofs, V.sub(j))
-                                )
-
-                # BCs on the entire vector-valued subspace
-                if bcs[-1]:
-                    for ids, val in bcs[-1]:
-                        # The boundary DOFs
-                        fcts = fct_fkts.indices[np.isin(fct_fkts.values, ids)]
-                        dofs = fem.locate_dofs_topological(V, fdim, fcts)
-
-                        # Set the boundary condition
-                        if callable(val):
-                            uDs.append(fem.Function(V))
-                            uDs[-1].interpolate(val)
-                            result.append(fem.dirichletbc(uDs[-1], dofs))
-                        else:
-                            uD = np.array((val,) * gdim, dtype=ScalarType)
-                            result.append(fem.dirichletbc(uD, dofs, V))
-            else:
-                if bcs_j:
                     for ids, val in bcs_j:
                         # The boundary DOFs
                         fcts = fct_fkts.indices[np.isin(fct_fkts.values, ids)]
-                        dofs = fem.locate_dofs_topological(V, fdim, fcts)
+                        dofs = fem.locate_dofs_topological(V.sub(j), fdim, fcts)
 
                         # Set the boundary condition
                         if callable(val):
-                            uDs.append(fem.Function(V))
-                            uDs[-1].interpolate(val)
-                            bcs_essnt.append(fem.dirichletbc(uDs[-1], dofs))
+                            raise NotImplementedError(
+                                "BC currently not implementable in DOLFINx"
+                            )
                         else:
-                            bcs_essnt.append(fem.dirichletbc(ScalarType(val), dofs))
+                            result.append(
+                                fem.dirichletbc(ScalarType(val), dofs, V.sub(j))
+                            )
+
+                # BCs on the entire vector-valued subspace
+                for ids, val in bcs[-1]:
+                    # The boundary DOFs
+                    fcts = fct_fkts.indices[np.isin(fct_fkts.values, ids)]
+                    dofs = fem.locate_dofs_topological(V, fdim, fcts)
+
+                    # Set the boundary condition
+                    if callable(val):
+                        uDs.append(fem.Function(V))
+                        uDs[-1].interpolate(val)
+                        result.append(fem.dirichletbc(uDs[-1], dofs))
+                    else:
+                        uD = np.array((val,) * gdim, dtype=ScalarType)
+                        result.append(fem.dirichletbc(uD, dofs, V))
+            else:
+                for ids, val in bcs_j:
+                    # The boundary DOFs
+                    fcts = fct_fkts.indices[np.isin(fct_fkts.values, ids)]
+                    dofs = fem.locate_dofs_topological(V, fdim, fcts)
+
+                    # Set the boundary condition
+                    if callable(val):
+                        uDs.append(fem.Function(V))
+                        uDs[-1].interpolate(val)
+                        bcs_essnt.append(fem.dirichletbc(uDs[-1], dofs))
+                    else:
+                        bcs_essnt.append(fem.dirichletbc(ScalarType(val), dofs))
 
         def set_essential_bcs_mixed_space(
-            fspace: typing.Tuple[fem.FunctionSpace, int, bool], definitions
+            bcs_i,
+            fspace: typing.Tuple[fem.FunctionSpace, int, bool],
+            result: typing.List[fem.DirichletBCMetaClass],
         ):
             # Extract function-space
             V = fspace[0]
@@ -255,29 +255,8 @@ class BCs:
             uDs = []
 
             if is_vector_valued:
-                for j, def_j in enumerate(definitions):
-                    if def_j:
-                        for ids, val in def_j:
-                            # Initialise the function
-                            uDs.append(fem.Function(Vi))
-
-                            # Interpolate boundary values
-                            if callable(val):
-                                uDs[-1].interpolate(val)
-                            else:
-                                if not np.isclose(val, 0.0):
-                                    uDs[-1].x.array[:] = val
-
-                            # Set the boundary condition
-                            dofs = fem.locate_dofs_topological(
-                                (V.sub(i).sub(j), Vi.sub(j)),
-                                fdim,
-                                fct_fkts.indices[np.isin(fct_fkts.values, ids)],
-                            )
-                            bcs_essnt.append(fem.dirichletbc(uDs[-1], dofs, V.sub(i)))
-            else:
-                if definitions:
-                    for ids, val in definitions:
+                for j, bcs_ij in enumerate(bcs_i[:-1]):
+                    for ids, val in bcs_ij:
                         # Initialise the function
                         uDs.append(fem.Function(Vi))
 
@@ -288,13 +267,44 @@ class BCs:
                             if not np.isclose(val, 0.0):
                                 uDs[-1].x.array[:] = val
 
-                        # Set the boundary condition
-                        dofs = fem.locate_dofs_topological(
-                            (V.sub(i), Vi),
-                            fdim,
-                            fct_fkts.indices[np.isin(fct_fkts.values, ids)],
-                        )
-                        bcs_essnt.append(fem.dirichletbc(uDs[-1], dofs, V.sub(i)))
+                            # Set the boundary condition
+                            fcts = fct_fkts.indices[np.isin(fct_fkts.values, ids)]
+                            dofs = fem.locate_dofs_topological(
+                                (V.sub(i).sub(j), Vi.sub(j)), fdim, fcts
+                            )
+                            result.append(fem.dirichletbc(uDs[-1], dofs, V.sub(i)))
+
+                for ids, val in bcs_i[-1]:
+                    # Initialise the function
+                    uDs.append(fem.Function(Vi))
+
+                    # Interpolate boundary values
+                    if callable(val):
+                        uDs[-1].interpolate(val)
+                    else:
+                        if not np.isclose(val, 0.0):
+                            uDs[-1].x.array[:] = val
+
+                    # Set the boundary condition
+                    fcts = fct_fkts.indices[np.isin(fct_fkts.values, ids)]
+                    dofs = fem.locate_dofs_topological((V.sub(i), Vi), fdim, fcts)
+                    result.append(fem.dirichletbc(uDs[-1], dofs, V.sub(i)))
+            else:
+                for ids, val in bcs_i:
+                    # Initialise the function
+                    uDs.append(fem.Function(Vi))
+
+                    # Interpolate boundary values
+                    if callable(val):
+                        uDs[-1].interpolate(val)
+                    else:
+                        if not np.isclose(val, 0.0):
+                            uDs[-1].x.array[:] = val
+
+                    # Set the boundary condition
+                    fcts = fct_fkts.indices[np.isin(fct_fkts.values, ids)]
+                    dofs = fem.locate_dofs_topological((V.sub(i), Vi), fdim, fcts)
+                    result.append(fem.dirichletbc(uDs[-1], dofs, V.sub(i)))
 
         def set_natural_bcs(
             bcs, fspace: typing.Tuple[fem.FunctionSpace, int, bool], ds: typing.Any
@@ -332,11 +342,9 @@ class BCs:
                 l_i = 0
 
                 for j, bcs_j in enumerate(bcs):
-                    if bcs_j:
-                        l_i += add_boundary_integrals(bcs_j, v[j], x)
+                    l_i += add_boundary_integrals(bcs_j, v[j], x)
             else:
-                if bcs:
-                    l_i = add_boundary_integrals(bcs, v, x)
+                l_i = add_boundary_integrals(bcs, v, x)
 
             return l_i
 
@@ -346,7 +354,7 @@ class BCs:
 
             # Set BCs
             if self.v_is_mixed:
-                set_essential_bcs_mixed_space((V, i, is_vvalued), ebcs)
+                set_essential_bcs_mixed_space(ebcs, (V, i, is_vvalued), bcs_essnt)
 
                 if not self.natr_bcs_are_zero:
                     bcs_natural += set_natural_bcs(nbcs, (V, i, is_vvalued), ds)

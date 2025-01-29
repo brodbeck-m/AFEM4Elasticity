@@ -4,7 +4,7 @@ from petsc4py import PETSc
 import time
 import typing
 
-from dolfinx import fem, mesh, la, io
+from dolfinx import cpp, fem, mesh, la, io
 import ufl
 
 from .basics import DiscDict, expnum_to_str
@@ -310,4 +310,122 @@ def estimate(
     u_h: typing.List[fem.Function],
     f: typing.Optional[typing.Any] = None,
 ) -> typing.Tuple[fem.Function, float, typing.List[float]]:
-    raise NotImplementedError("Error estimation not implemented!")
+    """Evaluate the error estimate
+
+    Args:
+        pi_1:  The ratio of the lambda and mu
+        sdisc: The spatial discretisation
+        u_h:   The approximated solution
+        f:     The source term
+
+    Returns:
+        The error estimate (per cell),
+        The overall, estimated error,
+        Timings [projection, equilibration, evaluate ee]
+    """
+
+    # Auxiliaries
+    def rows_to_uflmat(rows: typing.List[fem.Function], gdim: int):
+        if gdim == 2:
+            return ufl.as_matrix([[rows[0][0], rows[0][1]], [rows[1][1], rows[1][2]]])
+
+    # The spatial dimension
+    gdim = u_h[0].function_space.mesh.geometry.dim
+
+    # The error estimate
+    def ee_least_squares_functional(
+        pi_1: float, u_h: fem.Function, sig_h: typing.Any, f: typing.Any
+    ) -> typing.Tuple[typing.Any, fem.Function]:
+        # The DG0 function space
+        V = fem.FunctionSpace(u_h.function_space.mesh, ("DG", 0))
+        v = ufl.TrialFunction(V)
+
+        # Error of the stress-strain relation
+        eeps = Asigma(sig_h, pi_1) - symgrad(u_h)
+
+        # Error of the balance of linear momentum
+        eblm = ufl.div(sig_h) + f if f is not None else ufl.div(sig_h)
+
+        # The least-squares functional
+        form_lsf = fem.form(
+            (ufl.inner(eeps, eeps) + ufl.inner(eblm, eblm)) * v * ufl.dx
+        )
+
+        return form_lsf, fem.Function(V)
+
+    def ee_eqlb(
+        pi_1: float,
+        u_h: fem.Function,
+        d_sig_R: typing.Any,
+        sig_h: typing.List[fem.Function],
+        f: typing.Any,
+        korn: fem.Function,
+        guarantied_upper_bound: bool,
+    ) -> typing.Tuple[typing.Any, fem.Function]:
+        # The mesh
+        msh = u_h.function_space.mesh
+
+        # The DG0 function space
+        V = fem.FunctionSpace(msh, ("DG", 0))
+        v = ufl.TrialFunction(V)
+
+        # The basic error estimate
+        eta = ufl.inner(d_sig_R, Asigma(d_sig_R, pi_1))
+
+        # Error due to data oscillation
+        if f is not None:
+            # The characteristic mesh length
+            i_m = msh.topology.index_map(2)
+
+            h = fem.Function(V)
+            h.x.array[:] = cpp.mesh.h(msh, 2, range(i_m.size_local + i_m.num_ghosts))
+
+            # Error due to data oscillation
+            eo = korn * (h / ufl.pi) * (f + ufl.div(rows_to_uflmat(sig_h) + d_sig_R))
+
+            # Extend the error estimate
+            eta += ufl.inner(eo, eo)
+
+        if guarantied_upper_bound:
+            # Error due to assymetry
+            es = 0.5 * korn * (d_sig_R[0, 1] - d_sig_R[1, 0])
+            eta += ufl.inner(es, es)
+
+            if f is not None:
+                eta += 2 * ufl.sqrt(ufl.inner(eo, eo)) * ufl.sqrt(ufl.inner(es, es))
+
+        return fem.form(eta * v * ufl.dx), fem.Function(V)
+
+    if sdisc.fe_type == FEType.ls:
+        # Stress-tensor as UFL matrix
+        sigma_h = rows_to_uflmat(u_h[1:], gdim)
+
+        # Compile the error estimate
+        form_eta, eta = ee_least_squares_functional(pi_1, u_h[0], sigma_h, f)
+    else:
+        # Equilibrated the stress tensor
+        rows_d_sig_R, rows_sig_h, korns_constants = ...  # TODO
+
+        # Equilibrated stress-tensor as UFL matrix
+        d_sigma_R = rows_to_uflmat(u_h[1:], gdim)
+
+        # Compile the error estimate
+        if sdisc.ee_type == EEType.gee:
+            form_eta, eta = ee_eqlb(
+                pi_1, u_h[0], d_sigma_R, rows_sig_h, f, korns_constants, True
+            )
+        elif sdisc.ee_type == EEType.hee:
+            form_eta, eta = ee_eqlb(
+                pi_1, u_h[0], d_sigma_R, rows_sig_h, f, korns_constants, False
+            )
+        elif sdisc.ee_type == EEType.ls:
+            sigma_h = rows_to_uflmat(u_h[1:], gdim)
+            form_eta, eta = ee_least_squares_functional(
+                pi_1, u_h[0], d_sigma_R + sigma_h, f
+            )
+
+    # Assemble the cell-wise error
+    fem.petsc.assemble_vector(eta.vector, form_eta)
+    eta.x.scatter_forward()
+
+    return eta, eta.vector.sum()

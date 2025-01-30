@@ -84,6 +84,7 @@ class AdaptiveDomain:
 
     def prepare_mesh_for_eqlb(self, meshed_domain: mesh.Mesh) -> mesh.Mesh:
         """Prepare mesh for flux equilibration
+
         The current implementation of the flux equilibration requires at least two cells
         linked to each boundary node. This routines modifies meshes, such that this requi-
         rement is met.

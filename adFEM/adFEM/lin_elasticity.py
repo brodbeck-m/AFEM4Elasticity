@@ -7,8 +7,17 @@ import typing
 from dolfinx import cpp, fem, mesh, la, io
 import ufl
 
+from dolfinx_eqlb.cpp import local_solver_cholesky
+from dolfinx_eqlb.eqlb import FluxEqlbSE
+from dolfinx_eqlb.eqlb.check_eqlb_conditions import (
+    check_divergence_condition,
+    check_jump_condition,
+    check_weak_symmetry_condition,
+)
+
 from .basics import DiscDict, expnum_to_str
 from .domain import Domain
+from .bcs import BCs
 
 
 # --- Enum classes ---
@@ -269,15 +278,10 @@ def solve(
     solver.solve(L, u_h.vector)
     timings[1] += time.perf_counter()
 
-    if domain.mesh.comm.rank == 0:
-        stime = timings[0] + timings[1]
-        print(
-            f"nlemt - {domain.mesh.topology.index_map(2).size_global}, ndofs - {V.dofmap.index_map.size_global} timing: {stime:.3e} s"
-        )
-
     # --- Export solution to ParaView
     if sdisc.fe_type == FEType.fem_u:
         list_uh = [u_h]
+        ndofs = V.dofmap.bs * V.dofmap.index_map.size_global
 
         if outname is not None:
             u_h.name = "displacement"
@@ -291,21 +295,185 @@ def solve(
         u_h_sig2 = u_h.sub(2).collapse()
 
         list_uh = [u_h_u, u_h_sig1, u_h_sig2]
+        ndofs = V.dofmap.index_map.size_global
 
         if outname is not None:
             u_h_u.name = "displacement"
             with io.VTXWriter(MPI.COMM_WORLD, outname + "_pvar-u.bp", [u_h_u]) as vtx:
                 vtx.write(1.0)
 
-    return list_uh, V.dofmap.index_map.size_global, timings
+    if domain.mesh.comm.rank == 0:
+        stime = timings[0] + timings[1]
+        print(
+            f"nlemt - {domain.mesh.topology.index_map(2).size_global}, ndofs - {ndofs} timing: {stime:.3e} s"
+        )
+
+    return list_uh, ndofs, timings
 
 
 # --- The stress equilibrator ---
+def equilibrate(
+    pi_1: float,
+    domain: Domain,
+    bcs: BCs,
+    sdisc: DiscElast,
+    u_h: typing.List[fem.Function],
+    f: typing.Any,
+    check_equilibration: typing.Optional[bool] = False,
+) -> typing.Tuple[
+    typing.List[fem.Function],
+    typing.List[fem.Function],
+    fem.Function,
+    typing.List[float],
+]:
+
+    def set_forms_projection(
+        msh: mesh.Mesh,
+        degree_eqlb: int,
+        sig_h: typing.Any,
+        f: typing.Any,
+        quadrature_degree: typing.Optional[int] = None,
+    ):
+        # The function space to project into
+        V = fem.VectorFunctionSpace(msh, ("DG", degree_eqlb - 1))
+
+        # Trial- and test functions
+        u = ufl.TrialFunction(V)
+        v = ufl.TestFunction(V)
+
+        # The bilinear form
+        a = fem.form(ufl.inner(u, v) * ufl.dx)
+
+        # The linear form
+        if quadrature_degree is None:
+            dvol = ufl.dx
+        else:
+            dvol = ufl.Measure(
+                "dx",
+                domain=V.mesh,
+                metadata={"quadrature_degree": quadrature_degree},
+            )
+
+        ls = [
+            fem.form(ufl.inner(ufl.as_vector([sig_h[0, 0], sig_h[0, 1]]), v) * dvol),
+            fem.form(ufl.inner(ufl.as_vector([sig_h[1, 0], sig_h[1, 1]]), v) * dvol),
+        ]
+
+        if f is not None:
+            ls.append(fem.form(ufl.inner(f, v) * dvol))
+
+        # The solution function
+        results = [fem.Function(V) for _ in range(3)]
+
+        return a, ls, results
+
+    # Check input
+    if sdisc.symmetric_estress and sdisc.degree < 2:
+        raise ValueError(
+            "Weakly symmetric stress equilibration requires a primal approximation order >2!"
+        )
+
+    # Initialise timings
+    timings = [0.0, 0.0]
+
+    # The approximated stress (with negative sign!)
+    if sdisc.fe_type == FEType.fem_u:
+        sigma_h = -2 * symgrad(u_h[0]) - pi_1 * ufl.div(u_h[0]) * ufl.Identity(2)
+    elif sdisc.fe_type == FEType.fem_u_p:
+        raise NotImplementedError("Equilibration for u-p formulation not implemented!")
+
+    # Required projections
+    ap, lp, projections = set_forms_projection(
+        domain.mesh, sdisc.degree_eflux, sigma_h, f, sdisc.quadrature_degree
+    )
+
+    timings[0] -= time.perf_counter()
+    local_solver_cholesky([projections[i]._cpp_object for i in range(len(lp))], ap, lp)
+    timings[0] += time.perf_counter()
+
+    # Recast projected RHS into its components
+    timings[0] -= time.perf_counter()
+    rhs_proj = [projections[2].sub(i).collapse() for i in range(2)]
+    timings[0] += time.perf_counter()
+
+    # The equilibrator
+    equilibrator = FluxEqlbSE(
+        sdisc.degree_eflux,
+        domain.mesh,
+        rhs_proj,
+        projections[0:2],
+        sdisc.symmetric_estress,
+        True,
+    )
+
+    bcs_eqlb, esntfcts = bcs.set_for_equilibration(
+        equilibrator.V_flux, domain.facet_functions, -1.0
+    )
+    equilibrator.set_boundary_conditions(esntfcts, bcs_eqlb)
+
+    # Solve equilibration
+    timings[1] -= time.perf_counter()
+    equilibrator.equilibrate_fluxes()
+    timings[1] += time.perf_counter()
+
+    if check_equilibration:
+        # Stress as ufl matrix
+        stress_eqlb = ufl.as_matrix(
+            [
+                [-equilibrator.list_flux[0][0], -equilibrator.list_flux[0][1]],
+                [-equilibrator.list_flux[1][0], -equilibrator.list_flux[1][1]],
+            ]
+        )
+
+        stress_proj = ufl.as_matrix(
+            [
+                [-projections[0][0], -projections[0][1]],
+                [-projections[1][0], -projections[1][1]],
+            ]
+        )
+
+        # The divergence condition
+        div_condition_fulfilled = check_divergence_condition(
+            stress_eqlb,
+            stress_proj,
+            projections[2],
+            mesh=domain.mesh,
+            degree=sdisc.degree_eflux,
+            flux_is_dg=True,
+        )
+
+        if not div_condition_fulfilled:
+            raise ValueError("Divergence conditions not fulfilled")
+
+        # Check if stress is H(div)
+        for i in range(2):
+            jump_condition_fulfilled = check_jump_condition(
+                equilibrator.list_flux[i], projections[i]
+            )
+
+            if not jump_condition_fulfilled:
+                raise ValueError("Jump conditions not fulfilled")
+
+        # Check weak symmetry condition
+        if sdisc.symmetric_estress:
+            wsym_condition = check_weak_symmetry_condition(equilibrator.list_flux)
+
+            if not wsym_condition:
+                raise ValueError("Weak symmetry conditions not fulfilled")
+
+    return (
+        projections[0:2],
+        equilibrator.list_flux,
+        equilibrator.korn_constants,
+        timings,
+    )
 
 
 # --- The error estimator ---
 def estimate(
     pi_1: float,
+    domain: Domain,
+    bcs: BCs,
     sdisc: DiscElast,
     u_h: typing.List[fem.Function],
     f: typing.Optional[typing.Any] = None,
@@ -327,7 +495,7 @@ def estimate(
     # Auxiliaries
     def rows_to_uflmat(rows: typing.List[fem.Function], gdim: int):
         if gdim == 2:
-            return ufl.as_matrix([[rows[0][0], rows[0][1]], [rows[1][1], rows[1][2]]])
+            return ufl.as_matrix([[rows[0][0], rows[0][1]], [rows[1][0], rows[1][1]]])
 
     # The spatial dimension
     gdim = u_h[0].function_space.mesh.geometry.dim
@@ -381,7 +549,7 @@ def estimate(
             h.x.array[:] = cpp.mesh.h(msh, 2, range(i_m.size_local + i_m.num_ghosts))
 
             # Error due to data oscillation
-            eo = korn * (h / ufl.pi) * (f + ufl.div(rows_to_uflmat(sig_h) + d_sig_R))
+            eo = korn * (h / ufl.pi) * (f + ufl.div(-rows_to_uflmat(sig_h) + d_sig_R))
 
             # Extend the error estimate
             eta += ufl.inner(eo, eo)
@@ -404,10 +572,18 @@ def estimate(
         form_eta, eta = ee_least_squares_functional(pi_1, u_h[0], sigma_h, f)
     else:
         # Equilibrated the stress tensor
-        rows_d_sig_R, rows_sig_h, korns_constants = ...  # TODO
+        rows_sig_h, rows_d_sig_R, korns_constants, timings = equilibrate(
+            pi_1,
+            domain,
+            bcs,
+            sdisc,
+            u_h,
+            f,
+            True,
+        )
 
         # Equilibrated stress-tensor as UFL matrix
-        d_sigma_R = rows_to_uflmat(u_h[1:], gdim)
+        d_sigma_R = -rows_to_uflmat(rows_d_sig_R, gdim)
 
         # Compile the error estimate
         if sdisc.ee_type == EEType.gee:
@@ -419,13 +595,15 @@ def estimate(
                 pi_1, u_h[0], d_sigma_R, rows_sig_h, f, korns_constants, False
             )
         elif sdisc.ee_type == EEType.ls:
-            sigma_h = rows_to_uflmat(u_h[1:], gdim)
+            sigma_h = -rows_to_uflmat(rows_sig_h, gdim)
             form_eta, eta = ee_least_squares_functional(
                 pi_1, u_h[0], d_sigma_R + sigma_h, f
             )
 
     # Assemble the cell-wise error
+    timings.append(-time.perf_counter())
     fem.petsc.assemble_vector(eta.vector, form_eta)
     eta.x.scatter_forward()
+    timings[-1] += time.perf_counter()
 
-    return eta, eta.vector.sum()
+    return eta, eta.vector.sum(), timings

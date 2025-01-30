@@ -17,17 +17,17 @@ class MarkingStrategy(Enum):
 class Domain:
     """A domain"""
 
-    def __init__(self, mesh: mesh.Mesh, facet_fkts: typing.Any, ds: typing.Any):
+    def __init__(self, msh: mesh.Mesh, facet_fkts: typing.Any, ds: typing.Any):
         """Constructor
 
         Args:
-            mesh:       The mesh
+            msh:        The mesh
             facet_fkts: The facet functions
             ds:         The facet integrators
         """
 
         # Mesh
-        self.mesh = mesh
+        self.mesh = msh
 
         # Facet functions
         self.facet_functions = facet_fkts
@@ -200,20 +200,19 @@ class AdaptiveDomain:
     # --- Refine the mesh ---
     def refine(
         self,
-        domain: Domain,
-        eta_h: typing.Optional[fem.Function] = None,
+        msh: mesh.Mesh,
+        eta: typing.Optional[typing.Tuple[fem.Function, float]] = None,
         outname: typing.Optional[str] = None,
     ):
         """Refine the mesh based on the specified marking strategy
 
         Args:
-            domain:   The domain
-            eta_h:    The function of the cells error estimate
+            msh:      The mesh to refine
+            eta:      The estimated error
             outname:  The name of the output file for the mesh
                       (no output when not specified)
         """
 
-        msh = domain.mesh
         ncells = msh.topology.index_map(2).size_global
         comm = msh.comm
 
@@ -226,23 +225,20 @@ class AdaptiveDomain:
                 raise NotImplementedError("Maximum marking not implemented")
             else:
                 # Check input
-                if eta_h is None:
+                if eta is None:
                     raise ValueError("Error estimate required!")
 
-                # The total error (squared!)
-                eta_total = np.sum(eta_h.array)
-
                 # Cut-off
-                cutoff = self.marking_parameter * eta_total
+                cutoff = self.marking_parameter * eta[1]
 
                 # Sort cell contributions
-                sorted_cells = np.argsort(eta_h.array)[::-1]
+                sorted_cells = np.argsort(eta[0].x.array)[::-1]
 
                 # Create list of refined cells
                 rolling_sum = 0.0
                 breakpoint = ncells
 
-                for i, e in enumerate(eta_h.array[sorted_cells]):
+                for i, e in enumerate(eta[0].x.array[sorted_cells]):
                     rolling_sum += e
                     if rolling_sum > cutoff:
                         breakpoint = i
@@ -254,8 +250,8 @@ class AdaptiveDomain:
                 )
 
             # Refine mesh
-            edges = mesh.compute_incident_entities(self.mesh, refine_cells, 2, 1)
-            meshed_domain = mesh.refine(self.mesh, edges)
+            edges = mesh.compute_incident_entities(msh, refine_cells, 2, 1)
+            meshed_domain = mesh.refine(msh, edges)
 
         # Export mesh and error estimate into XDMF file
         if outname is not None:
@@ -265,8 +261,8 @@ class AdaptiveDomain:
             outfile.write_mesh(msh)
 
             # Write error estimate
-            if eta_h is not None:
-                outfile.write_function(eta_h, 0)
+            if eta is not None:
+                outfile.write_function(eta[0], 0)
 
         # Update counter
         self.refinement_level += 1

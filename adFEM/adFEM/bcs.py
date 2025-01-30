@@ -2,10 +2,13 @@ from enum import Enum
 import typing
 from mpi4py import MPI
 import numpy as np
+from numpy.typing import NDArray
 from petsc4py.PETSc import ScalarType
 
 from dolfinx import fem, io, mesh
 import ufl
+
+from dolfinx_eqlb.eqlb import fluxbc
 
 
 # --- The collected boundary conditions ---
@@ -116,6 +119,9 @@ class BCs:
         self.has_natr_bcs = not is_none(self.natr_bcs)
         self.natr_bcs_are_zero = mark_zero_bcs(self.natr_bcs)
 
+        # For equilibration: Marker of all facets with essential displacement BCs
+        self.esnt_fcts = [[] for _ in range(len(essential_bcs[0]) - 1)]
+
         # Markers
         self.bcs_initialised: bool = False
 
@@ -167,7 +173,42 @@ class BCs:
                     self.v_num_sub_elements.append(nsub)
                     self.v_sub_element_is_vvalued.append(True)
 
-            # TODO - Add input checks
+            # Set facets with essential BCs for the displacement
+            for j, ebcs_uj in enumerate(self.esnt_bcs[0][:-1]):
+                for ids, _ in ebcs_uj:
+                    self.esnt_fcts[j].extend(ids)
+
+            for ids, _ in self.esnt_bcs[0][-1]:
+                self.esnt_fcts[0].extend(ids)
+                self.esnt_fcts[1].extend(ids)
+
+            # Check defined boundary conditions
+            len_bcs = nsub if self.v_is_mixed else 1
+            if self.has_esnt_bcs and (len(self.esnt_bcs) != len_bcs):
+                raise ValueError(
+                    "Specify essential BCs for each sub-space. If no BCs are required, pass 'None'"
+                )
+
+            if self.has_natr_bcs and (len(self.natr_bcs) != len_bcs):
+                raise ValueError(
+                    "Specify natural BCs for each sub-space. If no BCs are required, pass 'None'"
+                )
+
+            for i, (ebcs, nbcs) in enumerate(zip(self.esnt_bcs, self.natr_bcs)):
+                nsub_i = self.v_num_sub_elements[i]
+
+                len_ebcs_i = nsub_i + 1 if self.v_sub_element_is_vvalued[i] else 1
+                len_nbcs_i = nsub_i
+
+                if self.has_esnt_bcs and (len(ebcs) != len_ebcs_i):
+                    raise ValueError(
+                        "Specify essential BCs for each spatial dimension of a function-space!"
+                    )
+
+                if self.has_natr_bcs and (len(nbcs) != len_nbcs_i):
+                    raise ValueError(
+                        "Specify natural BCs for each spatial dimension of a function-space!"
+                    )
 
         # Initialise list of BCs
         bcs_essnt = []
@@ -366,5 +407,39 @@ class BCs:
 
         return bcs_essnt, bcs_natural
 
-    def set_for_equilibration(self):
-        raise NotImplementedError("Method not implemented")
+    def set_for_equilibration(
+        self,
+        V: fem.FunctionSpace,
+        fct_fkts: typing.Any,
+        scaling: typing.Optional[float] = 1.0,
+    ) -> typing.Union[typing.List[typing.Any], typing.List[NDArray]]:
+
+        # The mesh
+        msh = V.mesh
+
+        # The spatial position
+        x = ufl.SpatialCoordinate(msh)
+
+        # Set stress BCs
+        bcs = [[], []]
+        dfcts = []
+        cnsts = [fem.Constant(msh, ScalarType(0.0))]
+
+        for j, bcs_j in enumerate(self.natr_bcs[0]):
+            for ids, val, is_zero in bcs_j:
+                # The boundary factes
+                fcts = fct_fkts.indices[np.isin(fct_fkts.values, ids)]
+
+                if is_zero:
+                    bcs[j].append(fluxbc(cnsts[0], fcts, V))
+                else:
+                    if callable(val):
+                        bcs[j].append(fluxbc(scaling * val(x), fcts, V))
+                    else:
+                        cnsts.append(fem.Constant(msh, ScalarType(scaling * val)))
+                        bcs[j].append(fluxbc(cnsts[-1], fcts, V))
+
+            # Factes with esential BCs
+            dfcts.append(fct_fkts.indices[np.isin(fct_fkts.values, self.esnt_fcts[j])])
+
+        return bcs, dfcts

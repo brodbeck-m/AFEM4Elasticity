@@ -35,7 +35,7 @@ def adaptive_solver(
     # The customised solver
     if eq_type == EqType.lin_elasticity:
         solve = lambda m, o: solve_linelast(matpar, m, bcs, sdisc, f, o)
-        estimate = lambda uh: estimate_linelast(matpar, sdisc, uh, f)
+        estimate = lambda dm, uh: estimate_linelast(matpar, dm, bcs, sdisc, uh, f)
     else:
         raise NotImplementedError("Model currently not supported!")
 
@@ -77,7 +77,7 @@ def adaptive_solver(
             )
 
         # Estimate error
-        # eta, eta_tot, eta_i_tot = estimate(u_h)
+        eta, eta_tot, timings_estimate = estimate(mdomain, u_h)
 
         # Store results
         id = domain.refinement_level
@@ -87,13 +87,10 @@ def adaptive_solver(
 
         results[id, 0] = mdomain.mesh.topology.index_map(2).size_global
         results[id, 1] = ndofs
-        # results[id, ...] = eta_tot
-        # for i, val in enumerate(eta_i_tot):
-        #     results[id, ... + i] = val
+        results[id, 2] = eta_tot
 
         # Refine
-        # mdomain = domain.refine(mdomain, eta)
-        mdomain = domain.refine(mdomain)
+        mdomain = domain.refine(mdomain.mesh, (eta, eta_tot))
 
     # --- Post processing
     if evaluate_true_error:
@@ -123,3 +120,5 @@ def adaptive_solver(
         if mdomain.mesh.comm.rank == 0:
             logfile.write(f"\nPostprocessing done in {time_post:.3e} s")
             logfile.close()
+
+    np.savetxt("TestOut.csv", results, delimiter=",")

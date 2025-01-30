@@ -42,10 +42,15 @@ class DiscDict:
 
         # The error estimate
         self.ee_type = None
-        self.degree_estress = None
+        self.degree_eflux = None
+        self.wsym_eflux = False
 
     # --- Setter methods ---
-    def specify_equilibration(self, degree: typing.Optional[int] = None):
+    def specify_equilibration(
+        self,
+        degree: typing.Optional[int] = None,
+        weakly_symmetric_flux: typing.Optional[bool] = False,
+    ):
         if degree < self.degree:
             raise ValueError(
                 "Degree of equilibrated stress must be at least '{self.degree}'!"
@@ -56,9 +61,12 @@ class DiscDict:
 
         # Set degree of equilibrated stress
         if degree is None:
-            self.degree_estress = self.degree
+            self.degree_eflux = self.degree
         else:
-            self.degree_estress = degree
+            self.degree_eflux = degree
+
+        # Consider weakly symmetry condition during equilibration
+        self.wsym_eflux = weakly_symmetric_flux
 
     # --- Getter methods ---
     def output_name(

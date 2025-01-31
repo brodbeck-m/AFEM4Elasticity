@@ -1,17 +1,14 @@
-from enum import Enum
 import typing
-from mpi4py import MPI
 import numpy as np
 from numpy.typing import NDArray
 from petsc4py.PETSc import ScalarType
 
-from dolfinx import fem, io, mesh
+from dolfinx import fem
 import ufl
 
 from dolfinx_eqlb.eqlb import fluxbc
 
 
-# --- The collected boundary conditions ---
 class BCs:
     """The collected boundary conditions"""
 
@@ -125,13 +122,13 @@ class BCs:
         # Markers
         self.bcs_initialised: bool = False
 
-    def set(
+    def set_for_fem(
         self,
         V: fem.FunctionSpace,
         fct_fkts: typing.Any,
         ds: typing.Any,
     ) -> typing.Tuple[typing.Union[typing.List[fem.DirichletBCMetaClass]], typing.Any]:
-        """Set boundary conditions
+        """Set boundary conditions for a FEM problem
 
         Args:
             V:        The function space

@@ -20,7 +20,7 @@ from .domain import Domain
 from .bcs import BCs
 
 
-# --- Enum classes ---
+# --- Supported discretisations and error estimates ---
 class FEType(Enum):
     fem_u = 0
     fem_u_p = 1
@@ -110,6 +110,7 @@ class DiscElast(DiscDict):
         return outname
 
 
+# --- Weak formulation ---
 def symgrad(u):
     return ufl.sym(ufl.grad(u))
 
@@ -201,7 +202,7 @@ def weak_form_ls(
 def solve(
     pi_1: float,
     domain: Domain,
-    bcs: typing.Type[typing.Any],
+    bcs: typing.Type[BCs],
     sdisc: DiscElast,
     f: typing.Optional[typing.Any] = None,
     outname: typing.Optional[str] = None,
@@ -218,7 +219,7 @@ def solve(
     Returns:
         The approximate solution,
         The number of degrees of freedom,
-        The solution time
+        Timings [assembly, solving]
     """
 
     timings = [0.0, 0.0]
@@ -237,7 +238,7 @@ def solve(
 
     # --- The boundary conditions
     domain.mesh.topology.create_connectivity(1, 2)
-    bcs_essnt, bcs_weak = bcs.set(V, domain.facet_functions, domain.ds)
+    bcs_essnt, bcs_weak = bcs.set_for_fem(V, domain.facet_functions, domain.ds)
 
     if bcs_weak is not None:
         residual -= bcs_weak

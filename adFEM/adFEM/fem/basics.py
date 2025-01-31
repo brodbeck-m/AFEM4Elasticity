@@ -7,7 +7,7 @@ class EqType(Enum):
     lin_elasticity = 0
 
 
-# --- Collection of discretisation information ---
+# --- The spatial discretisation ---
 def expnum_to_str(value: float) -> str:
     val_str = "{:.3e}".format(value).replace(".", "d")
     val_str = val_str.replace("e", "E")

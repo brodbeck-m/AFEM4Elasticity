@@ -8,14 +8,16 @@ from dolfinx import fem, io, mesh
 import ufl
 
 
+# --- Supported marking strategies ---
 class MarkingStrategy(Enum):
     none = 0
     doerfler = 1
     maximum = 2
 
 
+# --- The (mesh-dependent) domain ---
 class Domain:
-    """A domain"""
+    """The meshed domain"""
 
     def __init__(self, msh: mesh.Mesh, facet_fkts: typing.Any, ds: typing.Any):
         """Constructor
@@ -36,9 +38,16 @@ class Domain:
         self.ds = ds
 
 
-class AdaptiveDomain:
-    """An adaptive domain
-    Create an initial mesh and refines it based on a Doerfler or Maximum marking strategy.
+# --- The abstract (mesh-independent) domain definition ---
+class AbstractDomain:
+    """The abstract domain definition
+
+    This abstract class holds the domain definition and marking functions for the
+    boundaries. Boundary factes not especially marked, are tagged with max_tag + 1.
+
+    Meshed instances of type Domain - either created with a fixed resolution or by re-
+    fining an existing mesh - can be derived using either the create or the refine me-
+    thod. Mesh refinement is done either using a Doerfler or a Maximum marking strategy.
     """
 
     def __init__(
@@ -48,18 +57,20 @@ class AdaptiveDomain:
         marking_parameter: float,
         nref: int,
         accuracy: typing.Optional[float] = None,
+        tag_remaing_factes: typing.Optional[bool] = False,
     ):
         """Constructor
 
         Args:
-            name:              The domain name
-            marking_strategy:  The marking strategy
-            marking_parameter: The parameter of the underlying marking strategy
-            nref:              The number of refinements
-            accuracy:          The accuracy, after which the adaptive procedure stops
+            name:               The domain name
+            marking_strategy:   The marking strategy
+            marking_parameter:  The parameter of the underlying marking strategy
+            nref:               The number of refinements
+            accuracy:           The accuracy, after which the adaptive procedure stops
+            tag_remaing_factes: True, if remaining boundary factes should be tagged with
+                                max_tag + 1
         """
 
-        # --- Initialise storage
         # The domain name
         self.name = name
 
@@ -71,6 +82,7 @@ class AdaptiveDomain:
         self.refinement_level = 0
 
         # The boundary markers
+        self.tag_remaining_facets = tag_remaing_factes
         self.boundary_markers = []
 
     # --- The mesh definition ---
@@ -83,7 +95,7 @@ class AdaptiveDomain:
         raise NotImplementedError("Method not implemented")
 
     def prepare_mesh_for_eqlb(self, meshed_domain: mesh.Mesh) -> mesh.Mesh:
-        """Prepare mesh for flux equilibration
+        """Prepare a mesh for flux equilibration
 
         The current implementation of the flux equilibration requires at least two cells
         linked to each boundary node. This routines modifies meshes, such that this requi-
@@ -168,9 +180,10 @@ class AdaptiveDomain:
 
     # --- Set boundary markers ---
     def mark_boundary(self, meshed_domain: mesh.Mesh) -> Domain:
-        """Marks boundary facets
+        """Mark boundary facets
 
-        Factes are tagged based on initially defined boundary markers.
+        Tags boundary facets based on the n pre-defined markers.
+        Remaining factes are followingly tagged with n+1.
 
         Args:
             meshed_domain: The mesh of the domain
@@ -181,11 +194,28 @@ class AdaptiveDomain:
 
         facet_indices, facet_markers = [], []
 
+        # Handle tagged factes
         for marker, locator in self.boundary_markers:
             facets = mesh.locate_entities(meshed_domain, 1, locator)
             facet_indices.append(facets)
             facet_markers.append(np.full(len(facets), marker))
 
+        # Handle remaining factes
+        if self.tag_remaining_facets:
+            meshed_domain.topology.create_connectivity(1, 2)
+
+            remaining_facets = np.setdiff1d(
+                mesh.exterior_facet_indices(meshed_domain.topology),
+                np.array(np.hstack(facet_indices), dtype=np.int32),
+            )
+
+            if remaining_facets.size > 0:
+                facet_indices.append(remaining_facets)
+                facet_markers.append(
+                    np.full(len(facet_indices[-1]), len(self.boundary_markers) + 1)
+                )
+
+        # Set facet markers
         facet_indices = np.array(np.hstack(facet_indices), dtype=np.int32)
         facet_markers = np.array(np.hstack(facet_markers), dtype=np.int32)
         sorted_facets = np.argsort(facet_indices)
@@ -270,12 +300,15 @@ class AdaptiveDomain:
         return self.mark_boundary(meshed_domain)
 
 
-class AdaptiveDomainAbaqus(AdaptiveDomain):
-    """An adaptive domain for ABAQUS input files
+class AdaptiveDomainAbaqus(AbstractDomain):
+    """An abstract domain based on inputs from ABAQUS
 
-    Create an initial mesh based on a .inp file from ABAQUS. The ABAQUS export has to be done
-    using first order Lagrange elements. The domain is then refined based on a Doerfler or a
-    Maximum marking strategy.
+    Inherits the basic functionalities from AbstractDomain. Only the create method
+    has no possibility to prescribe a fixed resolution. The mesh is always created
+    as it is defined in the .inp file from ABAQUS.
+
+    Boundary markers are currently not extracted as passing these marker trough the
+    refienment process is currently not supported by DOLFINx.
     """
 
     def __init__(
@@ -287,24 +320,34 @@ class AdaptiveDomainAbaqus(AdaptiveDomain):
         marking_parameter: float,
         nref: int,
         accuracy: typing.Optional[float] = None,
+        tag_remaing_factes: typing.Optional[bool] = False,
     ):
         """Constructor
 
         Args:
-            name:              The domain name
-            path_to_inp:       The path to the .inp file
-            boundaries:        The boundary markers
-            marking_strategy:  The marking strategy
-            marking_parameter: The parameter of the underlying marking strategy
-            nref:              The number of refinements
-            accuracy:          The accuracy, after which the adaptive procedure stops
+            name:               The domain name
+            path_to_inp:        The path to the .inp file
+            boundaries:         The boundary markers
+            marking_strategy:   The marking strategy
+            marking_parameter:  The parameter of the underlying marking strategy
+            nref:               The number of refinements
+            accuracy:           The accuracy, after which the adaptive procedure stops
+            tag_remaing_factes: True, if remaining boundary factes should be tagged with
+                                max_tag + 1
         """
+
+        # Constructor of super class
+        super().__init__(
+            name,
+            marking_strategy,
+            marking_parameter,
+            nref,
+            accuracy,
+            tag_remaing_factes,
+        )
 
         # The patch to the .inp file
         self.path_to_inp = path_to_inp
-
-        # Constructor of super class
-        super().__init__(name, marking_strategy, marking_parameter, nref, accuracy)
 
         # Set boundary markers
         for n, bf in enumerate(boundaries):
@@ -312,11 +355,7 @@ class AdaptiveDomainAbaqus(AdaptiveDomain):
 
     # --- The mesh definition ---
     def create(self, h: typing.Union[float, int, typing.List[int]]) -> Domain:
-        """Create a meshed domain
-
-        Args:
-            eqlb_conf_mesh: True, if at least 2 cells have to be connected to an boundary node
-        """
+        """Create a meshed domain from a .inp file"""
 
         # Read ABAQUS input
         inp = meshio.read(self.path_to_inp)
@@ -334,76 +373,4 @@ class AdaptiveDomainAbaqus(AdaptiveDomain):
         )
 
         # Check mesh (at least 2 cells per node)
-        return self.mark_boundary(meshed_domain)
-
-    # --- Set boundary markers ---
-    def mark_boundary(self, meshed_domain: mesh.Mesh) -> Domain:
-        """Marks boundary facets
-
-        Factes are tagged based on either initially defined n
-        boundary markers or - if not mentioned - with n+1.
-
-        Args:
-            meshed_domain: The mesh of the domain
-
-        Returns:
-            The mesh-dependent representation of the domain
-        """
-
-        facet_indices, facet_markers = [], []
-
-        # Handle tagged factes
-        for marker, locator in self.boundary_markers:
-            facets = mesh.locate_entities(meshed_domain, 1, locator)
-            facet_indices.append(facets)
-            facet_markers.append(np.full(len(facets), marker))
-
-        # Handle remaining factes
-        meshed_domain.topology.create_connectivity(1, 2)
-
-        facet_indices.append(
-            np.setdiff1d(
-                mesh.exterior_facet_indices(meshed_domain.topology),
-                np.array(np.hstack(facet_indices), dtype=np.int32),
-            )
-        )
-        facet_markers.append(
-            np.full(len(facet_indices[-1]), len(self.boundary_markers) + 1)
-        )
-
-        # Set facet markers
-        facet_indices = np.array(np.hstack(facet_indices), dtype=np.int32)
-        facet_markers = np.array(np.hstack(facet_markers), dtype=np.int32)
-        sorted_facets = np.argsort(facet_indices)
-
-        facet_functions = mesh.meshtags(
-            meshed_domain, 1, facet_indices[sorted_facets], facet_markers[sorted_facets]
-        )
-        ds = ufl.Measure("ds", domain=meshed_domain, subdomain_data=facet_functions)
-
-        return Domain(meshed_domain, facet_functions, ds)
-
-
-class EssntBC:
-    def __init__(self, bc_is_strong: typing.Optional[bool] = True):
-        # Identifier for strong essential BCs
-        self.is_strong = bc_is_strong
-
-    def set(
-        self,
-        V: fem.FunctionSpace,
-        fct_fkts: typing.Any,
-        ds: typing.Any,
-    ) -> typing.Tuple[typing.Union[typing.List[fem.DirichletBCMetaClass]], typing.Any]:
-        """Set boundary conditions
-
-        Args:
-            V:        The function space
-            fct_fkts: The facet functions
-            ds:       The facet integrators
-
-        Returns:
-            BCs as list of DirichletBCs (Default: []),
-            BCs as additional terms for the residual (Default: None)
-        """
-        raise NotImplementedError("Method not implemented")
+        return self.mark_boundary(self.prepare_mesh_for_eqlb(meshed_domain))

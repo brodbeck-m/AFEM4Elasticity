@@ -111,6 +111,19 @@ class DiscElast(DiscDict):
 
 
 # --- Weak formulation ---
+def rows_to_uflmat(rows: typing.List[typing.Any], gdim: int):
+    if gdim == 2:
+        return ufl.as_matrix([[rows[0][0], rows[0][1]], [rows[1][0], rows[1][1]]])
+    else:
+        return ufl.as_matrix(
+            [
+                [rows[0][0], rows[0][1], rows[0][2]],
+                [rows[1][0], rows[1][1], rows[1][2]],
+                [rows[2][0], rows[2][1], rows[2][2]],
+            ]
+        )
+
+
 def symgrad(u):
     return ufl.sym(ufl.grad(u))
 
@@ -159,6 +172,10 @@ def weak_form_fem_up(
 def weak_form_ls(
     pi_1: float, msh: mesh.Mesh, sdisc: DiscElast, f: typing.Any
 ) -> typing.Tuple[fem.FunctionSpace, ufl.Form]:
+
+    # The spatial dimension
+    gdim = msh.geometry.dim
+
     # Material-specific compliance
     Asig = lambda sig: Asigma(sig, pi_1)
 
@@ -179,8 +196,8 @@ def weak_form_ls(
     v_u, v_sig1, v_sig2 = ufl.TestFunctions(V)
 
     # The variational form
-    sig = ufl.as_matrix([[sig1[0], sig1[1]], [sig2[0], sig2[1]]])
-    v_sig = ufl.as_matrix([[v_sig1[0], v_sig1[1]], [v_sig2[0], v_sig2[1]]])
+    sig = rows_to_uflmat([sig1, sig2], gdim)
+    v_sig = rows_to_uflmat([v_sig1, v_sig2], gdim)
 
     residual = (
         ufl.inner(symgrad(u) - Asig(sig), symgrad(v_u) - Asig(v_sig))
@@ -492,11 +509,6 @@ def estimate(
         The overall, estimated error,
         Timings [projection, equilibration, evaluate ee]
     """
-
-    # Auxiliaries
-    def rows_to_uflmat(rows: typing.List[fem.Function], gdim: int):
-        if gdim == 2:
-            return ufl.as_matrix([[rows[0][0], rows[0][1]], [rows[1][0], rows[1][1]]])
 
     # The spatial dimension
     gdim = u_h[0].function_space.mesh.geometry.dim
